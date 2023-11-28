@@ -57,5 +57,87 @@ class Director:
       print(e)
     return manager.start_project(iterable,join,**kwargs)
 
+class Manager:
+  def __init__(self,project):
+    self.workers = []
+    self.project = project
+    self.project._manager = self
+    self.lock = Lock()
+    self.__worker_input = None
+    self.__worker_output = None
+    self.__final_output = None
+
+  def update_bar(self,i):
+    self.pbar.update(1)
+    self.pbar.refresh()
+    if self.pbar.n == self.pbar.total:
+      sleep(1)
+      self.pbar.close()
+      self.layoffs()
+    return i
+
+  def set_bar(self,maxsize):
+    self.pbar = tqdm(total=maxsize, leave=True)
+    self.pbar.set_description(self.project.name)
+    pbar_worker = Worker('pbar','thread',self.__worker_output,self.__final_output,self.update_bar)
+    pbar_worker.Daemon = True
+    self.workers.append(pbar_worker)
+
+  def start_project(self,iterable,join=True,**kwargs):
+    if type(iterable) == Queue:
+      self.__worker_input = iterable
+      maxsize = self.__worker_input.maxsize
+      self.__worker_input.kwargs = kwargs
+    else:
+      maxsize=len(iterable)
+      self.__worker_input = Queue(maxsize=maxsize,**kwargs)
+      for x in iterable:
+        self.__worker_input.put(x)
+    sleep(1)
+    self.__worker_output = Queue(maxsize=maxsize)
+    self.__final_output = Queue(maxsize=maxsize)
+    self.hire_workers(self.__worker_input,self.__worker_output)
+    pbar_worker = self.set_bar(maxsize)
+    for worker in self.workers:
+      worker.start()
+    if not Join: return self.__final_output
+
+    self.__worker_input.join()
+    sleep(1)
+    results = []
+    while not self.__final_output.full():
+      sleep(0.01)
+    while not self.__final_output.empty():
+      results.append(self.__final_output.get())
+    return results
+
+  def wrap_up(self):
+    self.pbar.close()
+    self.layoffs()
+    while not self.__worker_input.empty():
+      self.__worker_input.get()
+    while not self.__worker_output.empty():
+      self.__worker_output.get()
+    while not self.__final_output.empty():
+      self.__final_output.get()
+
+  def hire_workers(self,Input,Output):
+    for worker in range(len(self.workers),self.project.workers):
+      ID = f'{self.project.name} - Worker {len(self.workers)+1}'
+      self.workers.append(Worker(ID,self.project.mode,Input,Output,self.project.target))
+
+  def layoffs(self):
+    while self.workers:
+      worker = self.workers.pop()
+      Manager.fire(worker)
+
+  def fire(worker):
+    worker._exit_code.set()
+    try:
+      if worker.is_alive():
+        worker.terminate()
+    except AttributeError:
+      pass
+
 
 
