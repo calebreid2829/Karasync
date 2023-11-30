@@ -139,5 +139,105 @@ class Manager:
     except AttributeError:
       pass
 
+class Worker:
+  def __init__(self,ID,Input,Output,target=None,*args,**kwargs):
+    super().__init__(*args,**kwargs)
+    self.ID = ID
+    self._Input = Input
+    self._Output = Output
+    self.target = target
+    self._status = 'idle'
+    pass
+
+  def run(self):
+    while not self._exit_code.is_set():
+      try:
+        vals = self._Input.get(block=True,timeout=1)
+        if type(vals) != tuple:
+          result = self.target(vals)
+        else:
+          args = vals[0]
+          kwargs = vals[1]
+          result = self.target(args,**kwargs)
+          self._Output.put(result,timeout=5)
+          self._Input.task_done()
+      except queue.Empty:
+        pass
+
+  def terminate(self):
+    super().terminate()
+
+class Thread_Worker(Worker,th.Thread):
+  def __init__(self,ID,Input,Output,target=None):
+    super().__init__(ID,Input,Output,target)
+    self._exit_code = Thread_Event()
+    self.Daemon = True
+
+class Process_Worker(Worker,mp.Process):
+  def __init__(self,ID,Input,Output,target=None):
+    super().__init__(ID,Input,Output,target)
+    self._exit_code = Event()
+    self.Daemon = True
+
+class Project:
+  def __init__(self,target,mode,workers,name,manager=None,*args,**kwargs):
+    self.name = name
+    self.target = target
+    self.mode = mode
+    self.workers = int(workers)
+    self.status = 'idle'
+    self._manager = manager
+    self._args = args
+    self._kwargs = kwargs
+
+  def layoffs(self,workers):
+    self.workers = workers
+    self._manager.layoffs()
+
+  def budget_increase(self,workers):
+    self.workers = workers
+    self._manager.hire_workers()
+
+def __retrieve_var_name(var):
+  callers_local_vars = inspect.currentframe().f_back.f_back.f_back.f_back.f_locals.items()
+  return [var_name for var_name, var_val in callers_local_vars if var_val is var]
+
+def __set_args(func,iterable,**kwargs):
+  func_names = __retrieve_var_name(iterable)
+  final_args = []
+  for y in iterable:
+    li = []
+    for x in func.__code__.co_varnames:
+      if x in kwargs: li.append(kwargs[x])
+      elif x in func_names: li.append(y)
+    final_args.append(li)
+  return final_args
+
+def Worker(ID,mode,Input,Output,target=None):
+  if mode == 'thread': return Thread_Worker(ID,Input,Output,target)
+  else: return Process_Worker(ID,Input,Output,target)
+
+def new_queue(mode,max_size):
+  if mode == 'threads': return queue.Queue()
+  else: return Queue()
+
+def test(num,num2):
+  return num * num2
+
+def test2(nums):
+  num1 = nums[0]
+  num2 = nums[1]
+  return num1 *-num2
+
+li = [x for x in range(10)]
+li2 = [x for x in range(10,20)]
+
+kamiya = Director(4,4)
+kamiya.new_project(test,'thread')
+kamiya.new_project(test2,'proc')
+results1 = kamiya.start_project('test',li,join=False,num2=5)
+results = kamiya.start_project('test2',(results1,li2))
+results
+
 
 
