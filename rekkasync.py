@@ -183,22 +183,6 @@ def new_queue(mode,max_size):
   if mode == 'threads': return queue.Queue()
   else: return Queue()
 
-def test(num):
-  return num * 5
-
-def test2(nums):
-  num1 = nums[0]
-  num2 = nums[1]
-  return num1 *-num2
-
-li = [x for x in range(10)]
-li2 = [x for x in range(10,20)]
-
-kamiya = Manager('thread',test,4,li)
-#kamiya.new_project(test2,'proc')
-results1 = kamiya.start_project(join=True)
-#results = kamiya.start_project('test2',(results1,li2))
-results1
 
 
 
