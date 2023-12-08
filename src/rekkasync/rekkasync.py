@@ -7,67 +7,70 @@ import pandas as pd
 import queue
 from time import sleep
 from tqdm.auto import tqdm
-from multiprocessing import Lock
+from multiprocessing import Lock, Pipe
 import multiprocessing.queues
+from functools import partial
 
 class Queue(mp.queues.JoinableQueue):
-  def __init__(self,maxsize=-1,block=True,timeout=None):
-    self.block = block
-    self.timeout = timeout
-    self.maxsize = maxsize
-    super().__init__(maxsize,ctx=mp.get_context())
+    def __init__(self,maxsize=-1,block=True,timeout=None,manager = None,pbar = False):
+        self.block = block
+        self.timeout = timeout
+        self.maxsize = maxsize
+        self.manager = manager
+        self.count = 0
+        if pbar: self.set_bar()
+        else: self.pbar = False
+        super().__init__(maxsize,ctx=mp.get_context())
 
-  def get(self,block=True,timeout=1):
-    values = super().get(block=block,timeout=timeout)
-    if values is None: raise queue.Empty
-    #if len(self.kwargs) > 0: values = (values,self.kwargs)
-    return values
+    def set_bar(self):
+        self.pbar = tqdm(total=self.maxsize, leave=True)
 
-class Manager:
-    def __init__(self,mode,target,workers,iterable,**kwargs):
-        self.target = target
-        self.lock = Lock()
-        self.worker_input = self.set_input(iterable)
-        self.__worker_output = Queue(maxsize=self.worker_input.maxsize)
-        self.__final_output = Queue(maxsize=self.worker_input.maxsize)
-        self.workers = self.hire_workers(workers,mode,self.worker_input,self.__worker_output,target)
-
-    def set_input(self,iterable):
-        if type(iterable) == Queue:
-          worker_input = iterable
-          maxsize = worker_input.maxsize
-        else:
-          maxsize=len(iterable)
-          worker_input = Queue(maxsize=maxsize)
-          for x in iterable:
-            worker_input.put(x)       
-        sleep(1)
-        return worker_input
-    
-    def set_bar(self,maxsize):
-        self.pbar = tqdm(total=maxsize, leave=True)
-        self.pbar.set_description(self.target.__name__)
+    def get(self,block=True,timeout=1):
+        values = super().get(block=block,timeout=timeout)
+        if values is None: raise queue.Empty
+        return values
 
     def update_bar(self):
-        try:
-            while True:
-                i = (yield)
-                self.pbar.update(i)
-                self.pbar.refresh()
-                if self.pbar.n == self.pbar.total:
-                    pass
-                    #sleep(1)
-                    #self.pbar.close()
-                    #self.layoffs()
-        except GeneratorExit: 
-            pass
+        self.pbar.update(1)
+        self.pbar.refresh()
+        self.count += 1
+        sleep(0.01)
+        if self.count >= self.maxsize:
+            self.pbar.close()
+
+    def put(self,result,timeout=5):
+        super().put(result,timeout)
+        if self.pbar: self.update_bar()
     
-    def start_project(self,join=True):
-        self.set_bar(self.worker_input.maxsize)
-        upd_bar = self.update_bar()
-        upd_bar.__next__()
+
+class Manager:
+    def __init__(self,workers,mode,target):
+        if type(target) == tuple:
+            self.target = partial(target[0],**target[1])
+        else:
+            self.target = target
+        self.worker_input = None
+        self.__worker_output = None
+        self.workers = None
+        self.hire_workers(workers,mode)
+
+    def set_pipeline(self,iterable,pbar):
+        if type(iterable) == Queue:
+          worker_input = iterable
+        else:
+          maxsize=len(iterable)
+          worker_input = Queue(maxsize=maxsize,manager=self)
+          for x in iterable:
+            worker_input.put(x) 
+        sleep(1)
+        self.worker_input = worker_input
+        self.__worker_output = Queue(maxsize=self.worker_input.maxsize,manager=self,pbar=pbar)
+    
+    def start_project(self,iterable,join=True,pbar=False):
+        self.set_pipeline(iterable,pbar)
         for worker in self.workers:
-            worker.bar = upd_bar
+            worker._Input = self.worker_input
+            worker._Output = self.__worker_output
             worker.start()
         if not join: return self.__worker_output
         
@@ -78,25 +81,21 @@ class Manager:
         while not self.__worker_output.empty():
             results.append(self.__worker_output.get())
         sleep(.25)
-        upd_bar.close()
         self.wrap_up()
         return results
     
     def wrap_up(self):
-        self.pbar.close()
         self.layoffs()
         while not self.worker_input.empty():
           self.worker_input.get()
         while not self.__worker_output.empty():
           self.__worker_output.get()
     
-    def hire_workers(self,workers,mode,Input,Output,target):
-        final_workers = []
+    def hire_workers(self,workers,mode):
+        self.workers = []
         for worker in range(workers):
-            ID = f'{target.__name__} - Worker {worker+1}'
-            final_workers.append(Worker(ID,mode,Input,Output,target))
-
-        return final_workers
+            ID = f'Worker {worker+1}'
+            self.workers.append(Worker(ID,mode,self.target))
         
     def layoffs(self):
         while self.workers:
@@ -113,16 +112,16 @@ class Manager:
 
 
 class Worker:
-    def __init__(self,ID,Input,Output,target=None,*args,**kwargs):
+    def __init__(self,ID,Input=None,Output=None,target=None,*args,**kwargs):
         super().__init__(*args,**kwargs)
         self.ID = ID
         self._Input = Input
         self._Output = Output
         self.target = target
         self._status = 'idle'
-        self.bar = None
 
-    
+    def get(self):
+        pass
 
     def run(self):
         while not self._exit_code.is_set():
@@ -138,10 +137,6 @@ class Worker:
                 result = self.target(args,**kwargs)
                 self._Output.put(result,timeout=5)
                 self._Input.task_done()
-            try:
-                self.bar.send(1)
-            except ValueError:
-                pass
           except queue.Empty as e:
             pass
 
@@ -149,36 +144,17 @@ class Worker:
         super().terminate()
 
 class Thread_Worker(Worker,th.Thread):
-  def __init__(self,ID,Input,Output,target=None):
+  def __init__(self,ID,Input=None,Output=None,target=None):
     super().__init__(ID,Input,Output,target)
     self._exit_code = Thread_Event()
     self.Daemon = True
 
 class Process_Worker(Worker,mp.Process):
-  def __init__(self,ID,Input,Output,target=None):
-    super().__init__(ID,Input,Output,target)
-    self._exit_code = Event()
-    self.Daemon = True
+    def __init__(self,ID,Input=None,Output=None,target=None):
+        super().__init__(ID,Input,Output,target)
+        self._exit_code = Event()
+        self.Daemon = True
 
-def __retrieve_var_name(var):
-  callers_local_vars = inspect.currentframe().f_back.f_back.f_back.f_back.f_locals.items()
-  return [var_name for var_name, var_val in callers_local_vars if var_val is var]
-
-def __set_args(func,iterable,**kwargs):
-  func_names = __retrieve_var_name(iterable)
-  final_args = []
-  for y in iterable:
-    li = []
-    for x in func.__code__.co_varnames:
-      if x in kwargs: li.append(kwargs[x])
-      elif x in func_names: li.append(y)
-    final_args.append(li)
-  return final_args
-
-def Worker(ID,mode,Input,Output,target=None):
-  if mode == 'thread': return Thread_Worker(ID,Input,Output,target)
-  else: return Process_Worker(ID,Input,Output,target)
-
-def new_queue(mode,max_size):
-  if mode == 'threads': return queue.Queue()
-  else: return Queue()
+def Worker(ID,mode,target):
+  if mode == 'thread': return Thread_Worker(ID,target=target)
+  else: return Process_Worker(ID,target=target)
