@@ -61,7 +61,7 @@ class Manager:
           maxsize=len(iterable)
           worker_input = Queue(maxsize=maxsize,manager=self)
           for x in iterable:
-            worker_input.put(x) 
+            worker_input.put([x]) 
         sleep(1)
         self.worker_input = worker_input
         self.__worker_output = Queue(maxsize=self.worker_input.maxsize,manager=self,pbar=pbar)
@@ -125,20 +125,17 @@ class Worker:
 
     def run(self):
         while not self._exit_code.is_set():
-          try:
-            vals = self._Input.get(block=True,timeout=1)
-            if type(vals) != tuple:
-                result = self.target(vals)
+            try:
+                vals = self._Input.get(block=True,timeout=1)
+                result = self.target(*vals)
                 self._Output.put(result,timeout=5)
                 self._Input.task_done()
-            else:
-                args = vals[0]
-                kwargs = vals[1]
-                result = self.target(args,**kwargs)
-                self._Output.put(result,timeout=5)
-                self._Input.task_done()
-          except queue.Empty as e:
-            pass
+            except queue.Empty as e:
+                pass
+            except Exception as e:
+                print(e)
+                self._exit_code.set()
+            
 
     def terminate(self):
         super().terminate()
